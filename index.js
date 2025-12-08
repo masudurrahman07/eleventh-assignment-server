@@ -6,11 +6,16 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
 const stripe = require('stripe')(process.env.STRIPE_SECRET);
+const multer = require('multer');
+const FormData = require('form-data');
+const fetch = require('node-fetch');
+const axios = require('axios');
 
 // ==================== CONFIG ====================
 const app = express();
-app.use(cors({ origin: '*' })); // allow frontend requests
+app.use(cors({ origin: '*' }));
 app.use(express.json());
+
 
 const port = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'supersecretkey';
@@ -20,7 +25,6 @@ if (!uri) {
   console.error("❌ ERROR: MONGO_URI is missing in .env");
   process.exit(1);
 }
-
 
 // ==================== MONGO SETUP ====================
 let client;
@@ -66,6 +70,8 @@ function verifyToken(req, res, next) {
     return res.status(401).send({ message: "Invalid token" });
   }
 }
+
+
 
 // ==================== AUTH ====================
 app.post('/auth/register', async (req, res) => {
@@ -126,38 +132,162 @@ app.post('/auth/login', async (req, res) => {
   }
 });
 
-// ====================USER=====================
 
-// Get user profile by email
+// ==================== IMAGE UPLOAD ENDPOINT ====================
+const upload = multer(); // memory storage
+
+
+app.post('/upload', upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: "Image file is required" });
+    }
+
+    const apiKey = process.env.VITE_IMGBB_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ message: "ImgBB API key not set in backend .env" });
+    }
+
+    // Convert image to base64
+    const base64Image = req.file.buffer.toString('base64');
+
+    // Send POST request to ImgBB
+    const response = await axios.post(
+      `https://api.imgbb.com/1/upload?key=${apiKey}`,
+      new URLSearchParams({ image: base64Image }).toString(),
+      {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      }
+    );
+
+    const data = response.data;
+
+    if (!data.success) {
+      console.error("ImgBB upload failed:", data);
+      return res.status(500).json({ message: "ImgBB upload failed", details: data });
+    }
+
+    res.json({ url: data.data.url });
+
+  } catch (err) {
+    console.error("POST /upload error:", err.message);
+    res.status(500).json({ message: "Image upload failed", error: err.message });
+  }
+});
+
+
+// =======================USERS============================
+
+// Get a single user by email
 app.get('/users/:email', verifyToken, async (req, res) => {
   try {
     const email = req.params.email;
-    const user = await usersCollection.findOne({ email });
+
+    const user = await usersCollection.findOne({ email }, { projection: { password: 0 } });
     if (!user) return res.status(404).send({ message: "User not found" });
 
-    // Exclude password from response
-    const { password, ...userData } = user;
-    res.send(userData);
+    res.send(user);
   } catch (err) {
     console.error("GET /users/:email error:", err);
-    res.status(500).send({ message: "Failed to fetch user profile" });
+    res.status(500).send({ message: "Failed to fetch user" });
   }
 });
 
-app.put('/users/:email', verifyToken, async (req, res) => {
+
+// ==================== MARK USER AS FRAUD ====================
+
+app.patch('/users/:id/fraud', verifyToken, async (req, res) => {
   try {
-    const email = req.params.email;
-    const updateData = req.body;
-    await usersCollection.updateOne({ email }, { $set: updateData });
-    res.send({ message: 'Profile updated' });
+    const { id } = req.params;
+
+    // Find the user first
+    const user = await usersCollection.findOne({ _id: new ObjectId(id) });
+    if (!user) return res.status(404).send({ message: "User not found" });
+
+    if (user.role === "admin") {
+      return res.status(403).send({ message: "Cannot mark admin as fraud" });
+    }
+
+    // Update the user's status
+    const updateResult = await usersCollection.findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      { $set: { status: "fraud" } },
+      { returnDocument: "after" } // return the updated document
+    );
+
+    res.send(updateResult.value); // frontend expects the updated user object
   } catch (err) {
-    res.status(500).send({ message: 'Failed to update profile' });
+    console.error("PATCH /users/:id/fraud error:", err);
+    res.status(500).send({ message: "Server error" });
   }
 });
+
+
 
 
 
 // ==================== MEALS ====================
+
+
+// Create a meal (chef only)
+// Create a meal (chef only)
+app.post('/meals', verifyToken, async (req, res) => {
+  try {
+    const {
+      foodName,
+      chefName,
+      foodImage,
+      price,
+      ingredients,
+      estimatedDeliveryTime,
+      chefExperience,
+    } = req.body;
+
+    if (!foodName || !chefName || !foodImage || !price || !ingredients || !estimatedDeliveryTime || !chefExperience) {
+      return res.status(400).send({ message: "All fields are required" });
+    }
+
+    // Get the logged-in user
+    const user = await usersCollection.findOne({ email: req.user.email });
+    if (!user) return res.status(404).send({ message: "User not found" });
+
+    // Fraud check
+    if (user.status === "fraud" && user.role === "chef") {
+      return res.status(403).send({ message: "Fraud users cannot create meals" });
+    }
+
+    // Only chefs can create meals
+    if (user.role !== "chef") {
+      return res.status(403).send({ message: "Only chefs can create meals" });
+    }
+
+    const meal = {
+      foodName,
+      chefName,
+      foodImage,
+      price: parseFloat(price),
+      ingredients: Array.isArray(ingredients)
+        ? ingredients
+        : ingredients.split(',').map(i => i.trim()),
+      estimatedDeliveryTime,
+      chefExperience,
+      chefId: user.chefId,
+      userEmail: user.email,
+      createdAt: new Date().toISOString(),
+    };
+
+    const result = await mealsCollection.insertOne(meal);
+    res.send({ ...meal, _id: result.insertedId });
+
+  } catch (err) {
+    console.error("POST /meals error:", err);
+    res.status(500).send({ message: "Failed to create meal" });
+  }
+});
+
+
 app.get('/meals', async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
@@ -325,7 +455,8 @@ app.get('/requests', verifyToken, async (req, res) => {
   }
 });
 
-// Update a request's status (Admin only)
+
+// Update a request's status (Admin only) with automatic role update
 app.patch('/requests/:id', verifyToken, async (req, res) => {
   try {
     const { id } = req.params;
@@ -339,23 +470,42 @@ app.patch('/requests/:id', verifyToken, async (req, res) => {
       return res.status(403).send({ message: "Forbidden: Admins only" });
     }
 
-    const collection = client.db('requests-db').collection('requests');
+    const requestsCollection = client.db('requests-db').collection('requests');
 
-    const result = await collection.findOneAndUpdate(
+    // Get the original request
+    const reqDoc = await requestsCollection.findOne({ _id: new ObjectId(id) });
+    if (!reqDoc) return res.status(404).send({ message: "Request not found" });
+
+    // Update request status
+    const result = await requestsCollection.findOneAndUpdate(
       { _id: new ObjectId(id) },
       { $set: { requestStatus } },
-      { returnDocument: 'after' } // returns updated document
+      { returnDocument: 'after' }
     );
 
-    if (!result.value) return res.status(404).send({ message: "Request not found" });
+    // If approved, update the user role
+    if (requestStatus === 'approved') {
+      if (reqDoc.requestType === 'chef') {
+        const chefId = `chef-${Math.floor(1000 + Math.random() * 9000)}`;
+        await usersCollection.updateOne(
+          { email: reqDoc.userEmail },
+          { $set: { role: 'chef', chefId } }
+        );
+      } else if (reqDoc.requestType === 'admin') {
+        await usersCollection.updateOne(
+          { email: reqDoc.userEmail },
+          { $set: { role: 'admin' } }
+        );
+      }
+    }
 
     res.send(result.value);
+
   } catch (err) {
     console.error('PATCH /requests/:id error:', err);
     res.status(500).send({ message: 'Failed to update request' });
   }
 });
-
 
 
 // ==================== FAVORITES ====================
@@ -431,25 +581,40 @@ app.delete('/favorites/:id', verifyToken, async (req, res) => {
 });
 
 
-
 // ==================== ORDERS ====================
 app.post('/orders', verifyToken, async (req, res) => {
   try {
     const { foodId, price, quantity, userAddress, orderStatus, paymentStatus } = req.body;
-    if (!foodId || !price || !quantity || !userAddress)
-      return res.status(400).send({ message: "All fields are required" });
 
-    // Fetch the meal info to get chefName and chefId
-    const meal = await mealsCollection.findOne({ _id: new ObjectId(foodId) });
+    if (!foodId || !price || !quantity || !userAddress) {
+      return res.status(400).send({ message: "All fields are required" });
+    }
+
+    // Get the logged-in user
+    const user = await usersCollection.findOne({ email: req.user.email });
+    if (!user) return res.status(404).send({ message: "User not found" });
+
+    if (user.status === "fraud" && user.role === "user") {
+      return res.status(403).send({ message: "Fraud users cannot place orders" });
+    }
+
+    // Safely fetch the meal info
+    let meal;
+    if (ObjectId.isValid(foodId)) {
+      meal = await mealsCollection.findOne({ _id: new ObjectId(foodId) });
+    } else {
+      meal = await mealsCollection.findOne({ _id: foodId });
+    }
+
     if (!meal) return res.status(404).send({ message: "Meal not found" });
 
     const orderEntry = {
       foodId,
-      mealName: meal.foodName,      // Use foodName from meals collection
+      mealName: meal.foodName || "N/A",
       price,
       quantity,
-      chefId: meal.chefId,          // chefId from meals
-      chefName: meal.chefName,      // chefName from meals
+      chefId: meal.chefId || "N/A",
+      chefName: meal.chefName || "N/A",
       userEmail: req.user.email,
       userAddress,
       orderStatus: orderStatus || "pending",
@@ -459,11 +624,13 @@ app.post('/orders', verifyToken, async (req, res) => {
 
     const result = await ordersCollection.insertOne(orderEntry);
     res.send({ message: "Order placed successfully!", order: { ...orderEntry, _id: result.insertedId } });
+
   } catch (err) {
     console.error("POST /orders error:", err);
     res.status(500).send({ message: "Server error" });
   }
 });
+
 
 app.get('/orders/my', verifyToken, async (req, res) => {
   try {
@@ -471,14 +638,12 @@ app.get('/orders/my', verifyToken, async (req, res) => {
 
     const updatedOrders = await Promise.all(
       orders.map(async (order) => {
+        // If chefName or chefId is missing, fetch from meals collection
         if (!order.chefName || !order.chefId) {
           let meal;
-
-          // Only convert to ObjectId if valid
           if (ObjectId.isValid(order.foodId)) {
             meal = await mealsCollection.findOne({ _id: new ObjectId(order.foodId) });
           } else {
-            // fallback: maybe _id is stored as string
             meal = await mealsCollection.findOne({ _id: order.foodId });
           }
 
@@ -501,6 +666,7 @@ app.get('/orders/my', verifyToken, async (req, res) => {
     );
 
     res.send(updatedOrders);
+
   } catch (err) {
     console.error("GET /orders/my error:", err);
     res.status(500).send({ message: "Failed to fetch your orders" });
