@@ -230,8 +230,6 @@ app.patch('/users/:id/fraud', verifyToken, async (req, res) => {
 
 // ==================== MEALS ====================
 
-
-// Create a meal (chef only)
 // Create a meal (chef only)
 app.post('/meals', verifyToken, async (req, res) => {
   try {
@@ -240,6 +238,7 @@ app.post('/meals', verifyToken, async (req, res) => {
       chefName,
       foodImage,
       price,
+      rating,
       ingredients,
       estimatedDeliveryTime,
       chefExperience,
@@ -253,12 +252,10 @@ app.post('/meals', verifyToken, async (req, res) => {
     const user = await usersCollection.findOne({ email: req.user.email });
     if (!user) return res.status(404).send({ message: "User not found" });
 
-    // Fraud check
     if (user.status === "fraud" && user.role === "chef") {
       return res.status(403).send({ message: "Fraud users cannot create meals" });
     }
 
-    // Only chefs can create meals
     if (user.role !== "chef") {
       return res.status(403).send({ message: "Only chefs can create meals" });
     }
@@ -268,6 +265,7 @@ app.post('/meals', verifyToken, async (req, res) => {
       chefName,
       foodImage,
       price: parseFloat(price),
+      rating: parseFloat(rating) || 0, // Ensure rating is saved
       ingredients: Array.isArray(ingredients)
         ? ingredients
         : ingredients.split(',').map(i => i.trim()),
@@ -287,7 +285,7 @@ app.post('/meals', verifyToken, async (req, res) => {
   }
 });
 
-
+// Get all meals (paginated)
 app.get('/meals', async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
@@ -304,6 +302,7 @@ app.get('/meals', async (req, res) => {
   }
 });
 
+// Get meal by ID
 app.get('/meals/:id', async (req, res) => {
   try {
     const id = req.params.id;
@@ -333,20 +332,133 @@ app.get('/meals/chef/:email', verifyToken, async (req, res) => {
 app.get('/orders/chef/:email', verifyToken, async (req, res) => {
   try {
     const chefEmail = req.params.email;
-
-    // Find meals created by this chef
     const chefMeals = await mealsCollection.find({ userEmail: chefEmail }).toArray();
     const chefMealIds = chefMeals.map(meal => String(meal._id));
-
-    // Find orders that match chefMealIds
     const orders = await ordersCollection.find({ foodId: { $in: chefMealIds } }).toArray();
-
     res.send(orders);
   } catch (err) {
     console.error("GET /orders/chef/:email error:", err);
     res.status(500).send({ message: "Failed to fetch chef orders" });
   }
 });
+
+// ==================== DELETE A MEAL ====================
+app.delete('/meals/:id', verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid meal ID" });
+
+    const meal = await mealsCollection.findOne({ _id: new ObjectId(id) });
+    if (!meal) return res.status(404).send({ message: "Meal not found" });
+
+    if (meal.userEmail !== req.user.email) {
+      return res.status(403).send({ message: "Forbidden: You can only delete your own meals" });
+    }
+
+    await mealsCollection.deleteOne({ _id: new ObjectId(id) });
+    res.send({ message: "Meal deleted successfully" });
+  } catch (err) {
+    console.error("DELETE /meals/:id error:", err);
+    res.status(500).send({ message: "Failed to delete meal" });
+  }
+});
+
+// ==================== UPDATE A MEAL ====================
+app.put('/meals/:id', verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updateData = req.body;
+
+    if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid meal ID" });
+
+    const meal = await mealsCollection.findOne({ _id: new ObjectId(id) });
+    if (!meal) return res.status(404).send({ message: "Meal not found" });
+
+    if (meal.userEmail !== req.user.email) {
+      return res.status(403).send({ message: "Forbidden: You can only update your own meals" });
+    }
+
+    // Ensure ingredients is always an array
+    if (updateData.ingredients && !Array.isArray(updateData.ingredients)) {
+      updateData.ingredients = updateData.ingredients.split(',').map(i => i.trim());
+    }
+
+    // Ensure rating is numeric if present
+    if (updateData.rating !== undefined) {
+      updateData.rating = parseFloat(updateData.rating) || 0;
+    }
+
+    await mealsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: updateData }
+    );
+
+    const updatedMeal = await mealsCollection.findOne({ _id: new ObjectId(id) });
+    res.send(updatedMeal);
+  } catch (err) {
+    console.error("PUT /meals/:id error:", err);
+    res.status(500).send({ message: "Failed to update meal" });
+  }
+});
+
+
+// ==================== DELETE A MEAL ====================
+app.delete('/meals/:id', verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid meal ID" });
+
+    const meal = await mealsCollection.findOne({ _id: new ObjectId(id) });
+    if (!meal) return res.status(404).send({ message: "Meal not found" });
+
+    // Only the chef who created the meal can delete it
+    if (meal.userEmail !== req.user.email) {
+      return res.status(403).send({ message: "Forbidden: You can only delete your own meals" });
+    }
+
+    await mealsCollection.deleteOne({ _id: new ObjectId(id) });
+    res.send({ message: "Meal deleted successfully" });
+  } catch (err) {
+    console.error("DELETE /meals/:id error:", err);
+    res.status(500).send({ message: "Failed to delete meal" });
+  }
+});
+
+// ==================== UPDATE A MEAL ====================
+app.put('/meals/:id', verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updateData = req.body;
+
+    if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid meal ID" });
+
+    const meal = await mealsCollection.findOne({ _id: new ObjectId(id) });
+    if (!meal) return res.status(404).send({ message: "Meal not found" });
+
+    // Only the chef who created the meal can update it
+    if (meal.userEmail !== req.user.email) {
+      return res.status(403).send({ message: "Forbidden: You can only update your own meals" });
+    }
+
+    // Make sure ingredients is an array
+    if (updateData.ingredients && !Array.isArray(updateData.ingredients)) {
+      updateData.ingredients = updateData.ingredients.split(',').map(i => i.trim());
+    }
+
+    await mealsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: updateData }
+    );
+
+    const updatedMeal = await mealsCollection.findOne({ _id: new ObjectId(id) });
+    res.send(updatedMeal);
+  } catch (err) {
+    console.error("PUT /meals/:id error:", err);
+    res.status(500).send({ message: "Failed to update meal" });
+  }
+});
+
 
 
 
