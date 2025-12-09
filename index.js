@@ -441,43 +441,14 @@ app.patch('/orders/:id/status', verifyToken, async (req, res) => {
   }
 });
 
-
-
 // ==================== REVIEWS ====================
-app.get('/reviews', async (req, res) => {
-  try {
-    const { foodId } = req.query;
-    const filter = foodId ? { foodId } : {};
-    const reviews = await reviewsCollection.find(filter).toArray();
-    res.send(reviews);
-  } catch (err) {
-    console.error('GET /reviews error:', err);
-    res.status(500).send({ message: "Server error" });
-  }
-});
 
-app.get('/reviews/:mealId', async (req, res) => {
-  try {
-    const { mealId } = req.params;
-    const mealIdStr = String(mealId);
-    const globalSix = await reviewsCollection.find({}).sort({ date: -1 }).limit(6).toArray();
-    const mealReviews = await reviewsCollection.find({ foodId: mealIdStr }).sort({ date: -1 }).toArray();
-
-    const existingIds = new Set(globalSix.map(r => String(r._id)));
-    const merged = [...globalSix];
-    for (const r of mealReviews) if (!existingIds.has(String(r._id))) merged.push(r);
-
-    res.send(merged);
-  } catch (err) {
-    console.error("GET /reviews/:mealId error:", err);
-    res.status(500).send({ message: "Server error" });
-  }
-});
+// 1️⃣ Create a review
 app.post('/reviews', verifyToken, async (req, res) => {
   try {
     const { foodId, reviewerName, reviewerImage, rating, comment } = req.body;
     if (!foodId || !reviewerName || !rating || !comment)
-      return res.status(400).send({ message: "All fields are required" });
+      return res.status(400).json({ message: "All fields are required" });
 
     const newReview = {
       foodId: String(foodId),
@@ -485,31 +456,172 @@ app.post('/reviews', verifyToken, async (req, res) => {
       reviewerImage: reviewerImage || "https://i.ibb.co/0s3pdnc/default-user.png",
       rating,
       comment,
-      reviewerEmail: req.user.email, // <-- added
+      reviewerEmail: req.user.email.toLowerCase(), // lowercase email
       date: new Date().toISOString(),
     };
 
     const result = await reviewsCollection.insertOne(newReview);
-    res.send({ ...newReview, _id: result.insertedId });
+    res.json({ ...newReview, _id: result.insertedId });
   } catch (err) {
     console.error('POST /reviews error:', err);
-    res.status(500).send({ message: "Server error" });
+    res.status(500).json({ message: "Server error" });
   }
 });
 
-
-// Get all reviews of the logged-in user
+// 2️⃣ Get logged-in user's reviews
+// 2️⃣ Get logged-in user's reviews (with meal names)
 app.get('/reviews/my', verifyToken, async (req, res) => {
   try {
-    const userEmail = req.user.email;
-    const reviews = await reviewsCollection.find({ reviewerEmail: userEmail }).sort({ date: -1 }).toArray();
-    res.send(reviews);
+    const userEmail = req.user.email.toLowerCase();
+    const reviews = await reviewsCollection.find({ reviewerEmail: userEmail })
+      .sort({ date: -1 })
+      .toArray();
+
+    // If no reviews, return empty array
+    if (reviews.length === 0) return res.json([]);
+
+    // Fetch all meals that match the foodIds in the reviews
+    const foodIds = reviews.map(r => r.foodId);
+    const meals = await mealsCollection.find({ _id: { $in: foodIds.map(id => ObjectId.isValid(id) ? new ObjectId(id) : id) } }).toArray();
+
+    // Map meals by id for quick lookup
+    const mealMap = {};
+    meals.forEach(meal => {
+      mealMap[String(meal._id)] = meal.foodName;
+    });
+
+    // Attach mealName to each review
+    const reviewsWithMealName = reviews.map(r => ({
+      ...r,
+      mealName: mealMap[r.foodId] || 'Unknown Meal',
+      _id: String(r._id),
+    }));
+
+    res.json(reviewsWithMealName);
   } catch (err) {
     console.error("GET /reviews/my error:", err);
-    res.status(500).send({ message: "Failed to fetch your reviews" });
+    res.status(500).json({ message: "Failed to fetch your reviews" });
   }
 });
 
+
+// 3️⃣ Delete a review
+app.delete('/reviews/:reviewId', verifyToken, async (req, res) => {
+  try {
+    const { reviewId } = req.params;
+    const userEmail = req.user.email.toLowerCase();
+
+    const result = await reviewsCollection.deleteOne({
+      _id: new ObjectId(reviewId),
+      reviewerEmail: userEmail,
+    });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ message: "Review not found or you don't have permission" });
+    }
+
+    res.json({ message: "Review deleted successfully" });
+  } catch (err) {
+    console.error("DELETE /reviews/:reviewId error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// 4️⃣ Update a review
+// Update review — PATCH /reviews/:reviewId
+app.patch('/reviews/:reviewId', verifyToken, async (req, res) => {
+  try {
+    const { reviewId } = req.params;
+    const { rating, comment } = req.body;
+
+    if (rating === undefined && comment === undefined) {
+      return res.status(400).json({ message: "Nothing to update" });
+    }
+
+    let objectId;
+    try {
+      objectId = new ObjectId(reviewId);
+    } catch {
+      return res.status(400).json({ message: "Invalid review ID" });
+    }
+
+    // Normalize email
+    const userEmail = req.user.email.toLowerCase();
+
+    // Prepare fields to update
+    const updateFields = {};
+    if (rating !== undefined) updateFields.rating = rating;
+    if (comment !== undefined) updateFields.comment = comment;
+    updateFields.date = new Date().toISOString();
+
+    // Find review first
+    const existingReview = await reviewsCollection.findOne({ _id: objectId });
+    if (!existingReview) {
+      return res.status(404).json({ message: "Review not found" });
+    }
+
+    // Check if logged-in user is the owner
+    if (existingReview.reviewerEmail.toLowerCase() !== userEmail) {
+      return res.status(403).json({ message: "You do not have permission to update this review" });
+    }
+
+    // Update the review
+    const result = await reviewsCollection.findOneAndUpdate(
+      { _id: objectId },
+      { $set: updateFields },
+      { returnDocument: "after" }
+    );
+
+    res.status(200).json(result.value);
+
+  } catch (err) {
+    console.error("PATCH /reviews/:reviewId error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+
+// 5️⃣ Get reviews of a meal
+app.get('/reviews/meal/:mealId', async (req, res) => {
+  try {
+    const { mealId } = req.params;
+    const mealIdStr = String(mealId);
+
+    const globalSix = await reviewsCollection.find({})
+      .sort({ date: -1 })
+      .limit(6)
+      .toArray();
+
+    const mealReviews = await reviewsCollection.find({ foodId: mealIdStr })
+      .sort({ date: -1 })
+      .toArray();
+
+    const existingIds = new Set(globalSix.map(r => String(r._id)));
+    const merged = [...globalSix];
+
+    for (const r of mealReviews) {
+      if (!existingIds.has(String(r._id))) merged.push(r);
+    }
+
+    res.json(merged);
+  } catch (err) {
+    console.error("GET /reviews/meal/:mealId error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// 6️⃣ Get all reviews
+app.get('/reviews', async (req, res) => {
+  try {
+    const { foodId } = req.query;
+    const filter = foodId ? { foodId } : {};
+    const reviews = await reviewsCollection.find(filter).toArray();
+    res.json(reviews);
+  } catch (err) {
+    console.error('GET /reviews error:', err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
 
 // ==================REQUEST=========================
 app.post('/requests', verifyToken, async (req, res) => {
