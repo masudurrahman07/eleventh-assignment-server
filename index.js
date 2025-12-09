@@ -284,16 +284,20 @@ app.post('/meals', verifyToken, async (req, res) => {
     res.status(500).send({ message: "Failed to create meal" });
   }
 });
-
-// Get all meals (paginated)
+// ==================== GET ALL MEALS (REAL PAGINATION) ====================
 app.get('/meals', async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
 
-    const meals = await mealsCollection.find().skip(skip).limit(limit).toArray();
     const total = await mealsCollection.countDocuments();
+    const meals = await mealsCollection
+      .find()
+      .sort({ createdAt: -1 }) // NEW: always newest first
+      .skip(skip)
+      .limit(limit)
+      .toArray();
 
     res.send({ total, meals });
   } catch (err) {
@@ -401,64 +405,41 @@ app.put('/meals/:id', verifyToken, async (req, res) => {
   }
 });
 
-
-// ==================== DELETE A MEAL ====================
-app.delete('/meals/:id', verifyToken, async (req, res) => {
+// ==================== UPDATE ORDER STATUS ====================
+app.patch('/orders/:id/status', verifyToken, async (req, res) => {
   try {
     const { id } = req.params;
+    const { status } = req.body;
 
-    if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid meal ID" });
+    if (!status) return res.status(400).send({ message: "Status is required" });
+    if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid order ID" });
 
-    const meal = await mealsCollection.findOne({ _id: new ObjectId(id) });
-    if (!meal) return res.status(404).send({ message: "Meal not found" });
+    // Find the order
+    const order = await ordersCollection.findOne({ _id: new ObjectId(id) });
+    if (!order) return res.status(404).send({ message: "Order not found" });
 
-    // Only the chef who created the meal can delete it
+    // Only the chef who owns the order's meal can update
+    const meal = await mealsCollection.findOne({ _id: new ObjectId(order.foodId) });
+    if (!meal) return res.status(404).send({ message: "Associated meal not found" });
+
     if (meal.userEmail !== req.user.email) {
-      return res.status(403).send({ message: "Forbidden: You can only delete your own meals" });
+      return res.status(403).send({ message: "Forbidden: You can only update your own orders" });
     }
 
-    await mealsCollection.deleteOne({ _id: new ObjectId(id) });
-    res.send({ message: "Meal deleted successfully" });
-  } catch (err) {
-    console.error("DELETE /meals/:id error:", err);
-    res.status(500).send({ message: "Failed to delete meal" });
-  }
-});
-
-// ==================== UPDATE A MEAL ====================
-app.put('/meals/:id', verifyToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const updateData = req.body;
-
-    if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid meal ID" });
-
-    const meal = await mealsCollection.findOne({ _id: new ObjectId(id) });
-    if (!meal) return res.status(404).send({ message: "Meal not found" });
-
-    // Only the chef who created the meal can update it
-    if (meal.userEmail !== req.user.email) {
-      return res.status(403).send({ message: "Forbidden: You can only update your own meals" });
-    }
-
-    // Make sure ingredients is an array
-    if (updateData.ingredients && !Array.isArray(updateData.ingredients)) {
-      updateData.ingredients = updateData.ingredients.split(',').map(i => i.trim());
-    }
-
-    await mealsCollection.updateOne(
+    // Update the order status
+    await ordersCollection.updateOne(
       { _id: new ObjectId(id) },
-      { $set: updateData }
+      { $set: { orderStatus: status } }
     );
 
-    const updatedMeal = await mealsCollection.findOne({ _id: new ObjectId(id) });
-    res.send(updatedMeal);
+    const updatedOrder = await ordersCollection.findOne({ _id: new ObjectId(id) });
+    res.send(updatedOrder);
+
   } catch (err) {
-    console.error("PUT /meals/:id error:", err);
-    res.status(500).send({ message: "Failed to update meal" });
+    console.error("PATCH /orders/:id/status error:", err);
+    res.status(500).send({ message: "Failed to update order status" });
   }
 });
-
 
 
 
