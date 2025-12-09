@@ -587,23 +587,11 @@ app.get('/reviews/meal/:mealId', async (req, res) => {
     const { mealId } = req.params;
     const mealIdStr = String(mealId);
 
-    const globalSix = await reviewsCollection.find({})
-      .sort({ date: -1 })
-      .limit(6)
-      .toArray();
-
     const mealReviews = await reviewsCollection.find({ foodId: mealIdStr })
       .sort({ date: -1 })
       .toArray();
 
-    const existingIds = new Set(globalSix.map(r => String(r._id)));
-    const merged = [...globalSix];
-
-    for (const r of mealReviews) {
-      if (!existingIds.has(String(r._id))) merged.push(r);
-    }
-
-    res.json(merged);
+    res.json(mealReviews);
   } catch (err) {
     console.error("GET /reviews/meal/:mealId error:", err);
     res.status(500).json({ message: "Server error" });
