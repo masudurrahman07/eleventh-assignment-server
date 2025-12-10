@@ -306,6 +306,22 @@ app.get('/meals', async (req, res) => {
   }
 });
 
+
+// Get all meals created by logged-in chef
+app.get('/meals/chef', verifyToken, async (req, res) => {
+  try {
+    const chefEmail = req.user.email; // email from JWT
+    const meals = await mealsCollection
+      .find({ userEmail: chefEmail })
+      .sort({ createdAt: -1 }) // newest first
+      .toArray();
+    res.send(meals);
+  } catch (err) {
+    console.error("GET /meals/chef error:", err);
+    res.status(500).send({ message: "Server error" });
+  }
+});
+
 // Get meal by ID
 app.get('/meals/:id', async (req, res) => {
   try {
@@ -320,31 +336,28 @@ app.get('/meals/:id', async (req, res) => {
   }
 });
 
-// Get all meals created by a specific chef
-app.get('/meals/chef/:email', verifyToken, async (req, res) => {
-  try {
-    const email = req.params.email;
-    const meals = await mealsCollection.find({ userEmail: email }).toArray();
-    res.send(meals);
-  } catch (err) {
-    console.error("GET /meals/chef/:email error:", err);
-    res.status(500).send({ message: "Server error" });
-  }
-});
+
 
 // Get all orders assigned to a specific chef
-app.get('/orders/chef/:email', verifyToken, async (req, res) => {
+// Get all orders assigned to logged-in chef
+app.get('/orders/chef', verifyToken, async (req, res) => {
   try {
-    const chefEmail = req.params.email;
+    const chefEmail = req.user.email; // email from JWT
+
+    // Get all meals created by this chef
     const chefMeals = await mealsCollection.find({ userEmail: chefEmail }).toArray();
     const chefMealIds = chefMeals.map(meal => String(meal._id));
+
+    // Get all orders for these meals
     const orders = await ordersCollection.find({ foodId: { $in: chefMealIds } }).toArray();
+
     res.send(orders);
   } catch (err) {
-    console.error("GET /orders/chef/:email error:", err);
+    console.error("GET /orders/chef error:", err);
     res.status(500).send({ message: "Failed to fetch chef orders" });
   }
 });
+
 
 // ==================== DELETE A MEAL ====================
 app.delete('/meals/:id', verifyToken, async (req, res) => {
@@ -775,6 +788,8 @@ app.delete('/favorites/:id', verifyToken, async (req, res) => {
 
 
 // ==================== ORDERS ====================
+
+
 app.post('/orders', verifyToken, async (req, res) => {
   try {
     const { foodId, price, quantity, userAddress, orderStatus, paymentStatus } = req.body;
@@ -865,6 +880,19 @@ app.get('/orders/my', verifyToken, async (req, res) => {
     res.status(500).send({ message: "Failed to fetch your orders" });
   }
 });
+
+app.get('/orders/:id', verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const order = await ordersCollection.findOne({ _id: new ObjectId(id), userEmail: req.user.email });
+    if (!order) return res.status(404).send({ message: 'Order not found' });
+    res.send(order);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: 'Server error' });
+  }
+});
+
 
 // ====================== ADMIN =========================
 
