@@ -8,7 +8,6 @@ require('dotenv').config();
 const stripe = require('stripe')(process.env.STRIPE_SECRET);
 const multer = require('multer');
 const FormData = require('form-data');
-const fetch = require('node-fetch');
 const axios = require('axios');
 
 
@@ -33,7 +32,7 @@ let ordersCollection, mealsCollection, reviewsCollection, favoritesCollection, u
 async function start() {
   try {
     client = new MongoClient(uri);
-    await client.connect();
+    // await client.connect();
     console.log("✅ MongoDB connected");
 
     mealsCollection = client.db('meals-db').collection('meals');
